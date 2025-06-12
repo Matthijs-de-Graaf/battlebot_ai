@@ -18,10 +18,7 @@ class BattleBotCallback(app_callback_class):
     def __init__(self, canbus: CANEncoder):
         super().__init__()
         self.min_bbox_area = 5000
-        self.frame_width = 1280
-        self.frame_height = 720
-        self.square_size = 200
-        self.use_frame = True
+        self.square_size = 400
         self.canbus = canbus
         self.base_speed = 1500 
         self.max_turn_adjustment = 100  
@@ -39,8 +36,8 @@ class BattleBotCallback(app_callback_class):
             print(f"Invalid caps: format={format}, width={width}, height={height}")
             return Gst.PadProbeReturn.OK
 
-        square_x1 = (self.frame_width - self.square_size) // 2
-        square_y1 = (self.frame_height - self.square_size) // 2
+        square_x1 = (self.video_width - self.square_size) // 2
+        square_y1 = (self.video_height - self.square_size) // 2
         square_x2 = square_x1 + self.square_size
         square_y2 = square_y1 + self.square_size
 
@@ -51,14 +48,13 @@ class BattleBotCallback(app_callback_class):
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
         bottle_detected = False
-        bottle_centered = False
 
         for detection in detections:
             label = detection.get_label()
             bbox = detection.get_bbox()
             confidence = detection.get_confidence()
 
-            if label == "bottle" and confidence > 0.7:
+            if label == "bottle" and confidence > 0.5:
                 x_min = int(bbox.xmin() * width)
                 y_min = int(bbox.ymin() * height)
                 x_max = int(bbox.xmax() * width)
@@ -70,22 +66,17 @@ class BattleBotCallback(app_callback_class):
                     continue
 
                 bottle_detected = True
-                # Check if bottle is in the centering square
                 if (square_x1 <= bottle_center[0] <= square_x2 and
                     square_y1 <= bottle_center[1] <= square_y2):
-                    bottle_centered = True
-                    gripper = self.gripper_closed  # Close gripper
-                    left_speed = self.base_speed  # Stop moving
+                    left_speed = self.base_speed  
                     right_speed = self.base_speed
                     print(f"Bottle centered, Confidence: {confidence:.2f}, Center: {bottle_center}, Closing gripper")
                 else:
-                    # Adjust steering to center the bottle
                     center_x = self.frame_width // 2
                     deviation = bottle_center[0] - center_x
                     adjustment = int((deviation / center_x) * self.max_turn_adjustment)
-                    left_speed = self.base_speed + adjustment
-                    right_speled = self.base_speed - adjustment
-                    # Clamp speeds to valid range
+                    left_speed = self.base_speed + adjustment + 150
+                    right_speed = self.base_speed - adjustment + 150
                     left_speed = max(1000, min(2000, left_speed))
                     right_speed = max(1000, min(2000, right_speed))
                     print(f"Bottle detected, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}, "
@@ -93,11 +84,11 @@ class BattleBotCallback(app_callback_class):
 
         if not bottle_detected:
             left_speed = self.base_speed + 175
-            right_speed = self.base_speed
-            gripper = self.gripper_open
+            right_speed = self.base_speed - 165
+            gripper = self.gripper_closed
             self.canbus.sendSteering((left_speed, right_speed, gripper))
             self.canbus.sendHeartbeat()
-            print("No bottle detected, maintaining neutral steering")
+            print("No bottle detected, searching")
             self.canbus.triggerFailsafe()
             
         else:
@@ -107,7 +98,6 @@ class BattleBotCallback(app_callback_class):
         return Gst.PadProbeReturn.OK
 
 async def main():
-    # Initialize CAN bus
     canbus = CANEncoder().callMCP2515Instance()
     if canbus.mcp2515 is None:
         print("Failed to initialize CAN bus, exiting")
@@ -117,8 +107,6 @@ async def main():
 
     user_data = BattleBotCallback(canbus)
     app = GStreamerDetectionApp(user_data.process_detection, user_data)
-
-    # Run the GStreamer pipeline in the main loop
     loop = GLib.MainLoop()
     try:
         app.run()
