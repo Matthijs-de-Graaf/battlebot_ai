@@ -23,7 +23,7 @@ class CANEncoder:
             print("MCP2515 instantie niet geïnitialiseerd")
             return
 
-        can_id: int = 0x100
+        can_id: int = 0x200
         data: List[int] = []
 
         for value in steering_channels:

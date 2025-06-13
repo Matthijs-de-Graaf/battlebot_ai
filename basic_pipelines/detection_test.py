@@ -2,6 +2,7 @@ import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
 import os
+import time
 import numpy as np
 import cv2
 import hailo
@@ -23,39 +24,36 @@ class BattleBotCallback(app_callback_class):
         self.canbus = canbus
         self.sensor = sensor
         self.base_speed = 1500
-        self.dynamic_pwm_value = 500
+        self.dynamic_pwm_value = 350
         self.max_turn_adjustment = 100  
-        self.gripper_open = 1000  
-        self.gripper_closed = 2000
+        self.gripper_open = 2000  
+        self.gripper_closed = 1000
         self.threshold = 50
         self.video_width = 1280
         self.video_height = 720
-        # self.bottle_distance = 11.5
         self.bottle_detected = False
+        self.history_distance = []
+        self.new_result = 0
 
-    def difference_wheels_pwm(self, steering_data):
-        left_wheel = steering_data[0]
-        right_wheel = steering_data[1]
-        gripper = steering_data[2]
+    def difference_wheels_pwm(self, steering_data):     
+        left_wheel, right_wheel, gripper = steering_data
 
         min_waarde_wiel = min(left_wheel, right_wheel)
         max_waarde_wiel = max(left_wheel, right_wheel)
 
         difference_values = int((max_waarde_wiel % min_waarde_wiel) / 2)
-        print(steering_data)
+        # print(steering_data)
 
         if difference_values > 50:
 
             left_wheel = int(1500 + (left_wheel - 1500) * 1.0)
             right_wheel = int(1500 + (right_wheel - 1500) * 1.0)
-            gripper = gripper
 
             if left_wheel < (right_wheel - 5):
                 left_wheel = int(1500 + (left_wheel - 1500) * 0.5 - 5)
             elif left_wheel > (right_wheel + 5):
                 right_wheel = int(1500 + (right_wheel - 1500) * 0.5 - 60)
 
-            return self.canbus.sendSteering((left_wheel, right_wheel, gripper))
         else:
             if left_wheel > right_wheel:
                 left_wheel -= difference_values
@@ -64,8 +62,70 @@ class BattleBotCallback(app_callback_class):
                 left_wheel += difference_values
                 right_wheel -= difference_values
 
-            return self.canbus.sendSteering((left_wheel, right_wheel, gripper))
+        self.canbus.sendSteering((left_wheel, right_wheel, gripper))
 
+    def defining_centre_square(self):
+        # Taking the width of the screen (1280 pixels) and then i wanted to make the square (400 pixels), this is hardcoded and can be changed
+        # Left wall is 440
+        # Top wall is 160
+        # Right wall is 840
+        # Bottom wall is 560
+        centre_left_wall = (self.video_width - self.square_size) // 2
+        centre_top_wall = (self.video_height - self.square_size) // 2
+        centre_right_wall = centre_left_wall + self.square_size
+        centre_bottom_wall = centre_top_wall + self.square_size
+        
+        return centre_left_wall, centre_top_wall, centre_right_wall, centre_bottom_wall
+
+    def defining_bottle_square(self, bbox, width, height):
+        # Taking the pixels of the width and height of the bottle by taking the bbox (bounding box from hailo, who is making the boxes)
+        # Works the same as defining_centre_square, kinda
+        bottle_left_wall = int(bbox.xmin() * width)
+        bottle_top_wall = int(bbox.ymin() * height)
+        bottle_right_wall = int(bbox.xmax() * width)
+        bottle_bottom_wall = int(bbox.ymax() * height)
+
+        bottle_center = ((bottle_left_wall + bottle_right_wall) // 2, (bottle_top_wall + bottle_bottom_wall) // 2)
+        bottle_area = (bottle_right_wall - bottle_left_wall) * (bottle_right_wall - bottle_top_wall)
+    
+        return bottle_center, bottle_area
+    
+    def moving_wheels_pwm(self, status_moving, status_gripper, adjustment=0):
+        # Decide which PWM values based on the status
+        left_speed = 1500
+        right_speed = 1500
+
+        if status_moving == "move":
+            left_speed = self.base_speed + adjustment + self.dynamic_pwm_value
+            right_speed = self.base_speed - adjustment + self.dynamic_pwm_value
+        elif status_moving == "searching":
+            left_speed = self.base_speed + adjustment + self.dynamic_pwm_value
+            right_speed = self.base_speed - adjustment - self.dynamic_pwm_value
+        elif status_moving == "stop":
+            left_speed = self.base_speed
+            right_speed = self.base_speed
+         
+        gripper = status_gripper
+        
+        left_speed = max(1000, min(2000, left_speed))
+        right_speed = max(1000, min(2000, right_speed))  
+         
+        # self.canbus.sendHeartbeat()
+        steering_data = int(left_speed), int(right_speed), int(gripper)
+        self.difference_wheels_pwm(steering_data)
+        
+    def adjust_wheels_pwm(self, bottle_center):
+        # Correct the direction of the wheels to go to the bottle
+        # Center_x is middle of the screen (1280 // 2 = 640)
+        # Deviation is just for knowing which side the wheels must turn (left or right)
+        # Is for knowing how far the deviation is from the middle of the screen (deviation / 640) * 100 
+        center_x = self.video_width // 2 # Vertical line on the x axis
+        deviation = bottle_center[0] - center_x
+        adjustment = int((deviation / center_x) * self.max_turn_adjustment)
+
+        print(f"center_bottle: {bottle_center[0]}, deviation: {deviation}, adjustment: {adjustment}")
+        self.moving_wheels_pwm("move", self.gripper_open, adjustment)
+        
     def process_detection(self, pad, info, extra):
         buffer = info.get_buffer()
         if buffer is None:
@@ -77,16 +137,11 @@ class BattleBotCallback(app_callback_class):
             print(f"Invalid caps: format={format}, width={width}, height={height}")
             return Gst.PadProbeReturn.OK
 
-        square_x1 = (self.video_width - self.square_size) // 2
-        square_y1 = (self.video_height - self.square_size) // 2
-        square_x2 = square_x1 + self.square_size
-        square_y2 = square_y1 + self.square_size
+        # All variables from the function and is added later in the if statement
+        centre_left_wall, centre_top_wall, centre_right_wall, centre_bottom_wall = self.defining_centre_square()
+        # print(self.defining_centre_square)
 
-        # print(square_x1, square_y1, square_x2, square_y2)
-
-        left_speed = self.base_speed
-        right_speed = self.base_speed
-        gripper = self.gripper_open
+        # self.moving_wheels_pwm("stop", self.gripper_open)
 
         roi = hailo.get_roi_from_buffer(buffer)
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
@@ -94,81 +149,74 @@ class BattleBotCallback(app_callback_class):
         # Afstand tot de fles
         distance = self.sensor.get_distance()
         truncated_distance = float(f"{distance:.1f}"[:5])
-        # print(truncated_distance)
-
-        #
-        # ############3
-        #
         
         for detection in detections:
             label = detection.get_label()
             bbox = detection.get_bbox()
             confidence = detection.get_confidence()
 
-            if label == "bottle" and confidence > 0.5:
-                x_min = int(bbox.xmin() * width)
-                y_min = int(bbox.ymin() * height)
-                x_max = int(bbox.xmax() * width)
-                y_max = int(bbox.ymax() * height)
-                bottle_center = ((x_min + x_max) // 2, (y_min + y_max) // 2)
-                bottle_area = (x_max - x_min) * (y_max - y_min)
+            # We are targeting the bottle, so remove the vase later and the same with th 30% confidence
+            if label == "bottle" and confidence > 0.3 or label == "vase":
+                bottle_center, bottle_area = self.defining_bottle_square(bbox, width, height)
                 self.bottle_detected = True
+        
+                # print(f"Bottle Center:{bottle_area}, Bottle Area:{bottle_center}")
                 
-                # print(x_min, y_min, x_max, y_max)
-
                 if bottle_area < self.min_bbox_area:
                     continue
 
-                if (square_x1 <= bottle_center[0] <= square_x2 and
-                    square_y1 <= bottle_center[1] <= square_y2):
-                    left_speed = self.base_speed + self.dynamic_pwm_value
-                    right_speed = self.base_speed + self.dynamic_pwm_value
+                if (centre_left_wall <= bottle_center[0] <= centre_right_wall and
+                    centre_top_wall <= bottle_center[1] <= centre_bottom_wall):
+                    # If the bottle is in the middle, then the gripper needs to be set open for taking action later. 
 
-                    steering_data = (int(left_speed), int(right_speed), int(gripper))
-                    self.difference_wheels_pwm(steering_data)
-                    # self.canbus.sendHeartbeat()
-                    print(f"Bottle centered, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}, "
-                          f"Left: {left_speed}, Right: {right_speed}")
+                    self.moving_wheels_pwm("move", self.gripper_open)
+                    # print(f"Bottle centered, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}")
                 
                 else:
-                    center_x = self.video_width // 2
-                    deviation = bottle_center[0] - center_x
-                    adjustment = int((deviation / center_x) * self.max_turn_adjustment)
+                    # Face the bottle
+                    self.adjust_wheels_pwm(bottle_center)
+                    # print(f"Bottle detected, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}")
+                    pass
+
+                if self.bottle_detected:
+                    # If the bottle was seen and then take action for closing the gripper
+
+                    if truncated_distance == float(-1):
+                        continue
+
+                    if len(self.history_distance) < 10:
+                        self.history_distance.append(truncated_distance)
+                    else:
+                        self.history_distance.pop(0)
                     
-                    left_speed = self.base_speed + adjustment + self.dynamic_pwm_value
-                    right_speed = self.base_speed - adjustment + self.dynamic_pwm_value
+                    result = 0
 
-                    left_speed = max(1000, min(2000, left_speed))
-                    right_speed = max(1000, min(2000, right_speed))
-                    gripper = self.gripper_open
+                    for distance_new in self.history_distance:
+                        result += distance_new
+                    
+                    if len(self.history_distance) == 9:
+                        self.new_result = float((f"{result / 10:.1f}"[:5]))
+                        
+                        print(self.new_result)
 
-                    steering_data = (int(left_speed), int(right_speed), int(gripper))
-                    self.difference_wheels_pwm(steering_data)
-                    # self.canbus.sendHeartbeat()
-                    print(f"Bottle detected, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}, "
-                          f"Left: {left_speed}, Right: {right_speed}")
+                    if self.new_result <= float(12):
+                        print(f"Attempt to close gripper: Distance: {truncated_distance}, gripper value: {self.gripper_closed}")
+                        self.moving_wheels_pwm("stop", self.gripper_closed)
+                        time.sleep(0.001)
 
-            elif self.bottle_detected:
-            #     self.bottle_detected = False
-                if truncated_distance > float(11) and truncated_distance < float(12):
-                    left_speed = self.base_speed  
-                    right_speed = self.base_speed 
-                    gripper = self.gripper_closed
-                    print(f"{truncated_distance}")
-                elif truncated_distance > float(12):
-                    left_speed = self.base_speed  + self.dynamic_pwm_value
-                    right_speed = self.base_speed + self.dynamic_pwm_value
+                    elif self.new_result > 20:
+                        # print(f"probeer te stoppen, gripper value: {self.gripper_closed}")
+                        self.moving_wheels_pwm("stop", self.gripper_open)
 
-                    gripper = self.gripper_open
-
-                    steering_data = (int(left_speed), int(right_speed), int(gripper))
-                    self.difference_wheels_pwm(steering_data)
-                    print(f"boven de twaalef: {truncated_distance, steering_data}")
+                    # elif truncated_distance > float(12):
+                    #     self.moving_wheels_pwm("move", self.gripper_open)
+                    #     print(f"boven de twaalef: {truncated_distance}")
+                    #     time.sleep(0.1)
             else:
-                self.bottle_detected = False
-                gripper = self.gripper_closed
-                steering_data = (int(left_speed), int(right_speed), int(gripper))
-                self.difference_wheels_pwm(steering_data)
+                # Is going to spin to look for the bottle
+                # self.bottle_detected = False
+                # self.moving_wheels_pwm("searching", self.gripper_open)
+                pass
 
         return Gst.PadProbeReturn.OK
 
