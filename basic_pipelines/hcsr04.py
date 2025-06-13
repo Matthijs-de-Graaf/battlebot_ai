@@ -38,7 +38,7 @@ class HCSR04:
 
         # Calculate distance (speed of sound = 343 m/s, so 17150 cm/s)
         distance = (end_time - start_time) * 17150
-        return distance if distance < 150 else -1  # Filter out unrealistic distances (>4m)
+        return distance if distance < 350 else -1  # Filter out unrealistic distances (>4m)
 
     def get_distance(self):
         """Get a single distance measurement."""

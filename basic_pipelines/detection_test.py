@@ -24,8 +24,8 @@ class BattleBotCallback(app_callback_class):
         self.canbus = canbus
         self.sensor = sensor
         self.base_speed = 1500
-        self.dynamic_pwm_value = 350
-        self.max_turn_adjustment = 100  
+        self.dynamic_pwm_value = 250
+        self.max_turn_adjustment = 100 
         self.gripper_open = 2000  
         self.gripper_closed = 1000
         self.threshold = 50
@@ -96,6 +96,12 @@ class BattleBotCallback(app_callback_class):
         right_speed = 1500
 
         if status_moving == "move":
+            left_speed = self.base_speed + self.dynamic_pwm_value
+            right_speed = self.base_speed + self.dynamic_pwm_value
+        elif status_moving == "move_left":
+            left_speed = self.base_speed - adjustment + self.dynamic_pwm_value
+            right_speed = self.base_speed + adjustment + self.dynamic_pwm_value
+        elif status_moving == "move":
             left_speed = self.base_speed + adjustment + self.dynamic_pwm_value
             right_speed = self.base_speed - adjustment + self.dynamic_pwm_value
         elif status_moving == "searching":
@@ -109,7 +115,9 @@ class BattleBotCallback(app_callback_class):
         
         left_speed = max(1000, min(2000, left_speed))
         right_speed = max(1000, min(2000, right_speed))  
-         
+
+        print(left_speed, right_speed, gripper)
+        
         # self.canbus.sendHeartbeat()
         steering_data = int(left_speed), int(right_speed), int(gripper)
         self.difference_wheels_pwm(steering_data)
@@ -122,10 +130,25 @@ class BattleBotCallback(app_callback_class):
         center_x = self.video_width // 2 # Vertical line on the x axis
         deviation = bottle_center[0] - center_x
         adjustment = int((deviation / center_x) * self.max_turn_adjustment)
-
-        print(f"center_bottle: {bottle_center[0]}, deviation: {deviation}, adjustment: {adjustment}")
-        self.moving_wheels_pwm("move", self.gripper_open, adjustment)
         
+        if deviation < 0:
+            if adjustment < 15:
+                adjustment = abs(adjustment) * 5
+                self.moving_wheels_pwm("move_left", self.gripper_open, adjustment)
+                print(f"center_bottle: {bottle_center[0]}, deviation: {deviation}, adjustment: {adjustment}")
+
+            self.moving_wheels_pwm("move_left", self.gripper_open, adjustment)
+            print(f"center_bottle: {bottle_center[0]}, deviation: {deviation}, adjustment: {adjustment}")
+
+        elif deviation > 0:
+            if adjustment < 15:
+                adjustment = abs(adjustment) * 5
+                self.moving_wheels_pwm("move_right", self.gripper_open, adjustment)
+                print(f"center_bottle: {bottle_center[0]}, deviation: {deviation}, adjustment: {adjustment}")
+
+            self.moving_wheels_pwm("move_right", self.gripper_open, adjustment)
+            print(f"center_bottle: {bottle_center[0]}, deviation: {deviation}, adjustment: {adjustment}")
+
     def process_detection(self, pad, info, extra):
         buffer = info.get_buffer()
         if buffer is None:
@@ -168,54 +191,57 @@ class BattleBotCallback(app_callback_class):
                 if (centre_left_wall <= bottle_center[0] <= centre_right_wall and
                     centre_top_wall <= bottle_center[1] <= centre_bottom_wall):
                     # If the bottle is in the middle, then the gripper needs to be set open for taking action later. 
+                    # Need to change the if statement bc i think this is not neccesary
 
                     self.moving_wheels_pwm("move", self.gripper_open)
-                    # print(f"Bottle centered, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}")
+                    # self.adjust_wheels_pwm(bottle_center)
+
+                    print(f"Bottle centered, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}")
                 
                 else:
                     # Face the bottle
                     self.adjust_wheels_pwm(bottle_center)
-                    # print(f"Bottle detected, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}")
+                    print(f"Bottle detected, Confidence: {confidence:.2f}, Center: {bottle_center}, Area: {bottle_area}")
                     pass
 
-                if self.bottle_detected:
-                    # If the bottle was seen and then take action for closing the gripper
-
-                    if truncated_distance == float(-1):
-                        continue
-
-                    if len(self.history_distance) < 10:
-                        self.history_distance.append(truncated_distance)
-                    else:
-                        self.history_distance.pop(0)
-                    
-                    result = 0
-
-                    for distance_new in self.history_distance:
-                        result += distance_new
-                    
-                    if len(self.history_distance) == 9:
-                        self.new_result = float((f"{result / 10:.1f}"[:5]))
-                        
-                        print(self.new_result)
-
-                    if self.new_result <= float(12):
-                        print(f"Attempt to close gripper: Distance: {truncated_distance}, gripper value: {self.gripper_closed}")
-                        self.moving_wheels_pwm("stop", self.gripper_closed)
-                        time.sleep(0.001)
-
-                    elif self.new_result > 20:
-                        # print(f"probeer te stoppen, gripper value: {self.gripper_closed}")
-                        self.moving_wheels_pwm("stop", self.gripper_open)
-
-                    # elif truncated_distance > float(12):
-                    #     self.moving_wheels_pwm("move", self.gripper_open)
-                    #     print(f"boven de twaalef: {truncated_distance}")
-                    #     time.sleep(0.1)
-            else:
+                # elif truncated_distance > float(12):
+                #     self.moving_wheels_pwm("move", self.gripper_open)
+                #     print(f"boven de twaalef: {truncated_distance}")
+                #     time.sleep(0.1)
+            elif self.bottle_detected:
                 # Is going to spin to look for the bottle
                 # self.bottle_detected = False
                 # self.moving_wheels_pwm("searching", self.gripper_open)
+                # if self.bottle_detected:
+                #     # If the bottle was seen and then take action for closing the gripper
+                print("bottle_detected")
+                if truncated_distance == float(-1):
+                    continue
+
+                if len(self.history_distance) < 5:
+                    self.history_distance.append(truncated_distance)
+                else:
+                    self.history_distance.pop(0)
+                
+                result = 0
+
+                for distance_new in self.history_distance:
+                    result += distance_new
+                
+                if len(self.history_distance) == 4:
+                    self.new_result = float(f"{result / 5:.1f}"[:5])
+                    
+                    print(self.new_result)
+
+                if self.new_result <= float(12):
+                    print(f"Attempt to close gripper: Distance: {truncated_distance}, gripper value: {self.gripper_closed}")
+                    self.moving_wheels_pwm("stop", self.gripper_closed)
+                    time.sleep(0.001)
+
+                elif self.new_result > float(20):
+                    print(f"probeer verder  , gripper value: {self.gripper_closed}")
+                    self.moving_wheels_pwm("move", self.gripper_open)
+            else:
                 pass
 
         return Gst.PadProbeReturn.OK
